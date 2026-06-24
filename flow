@@ -1,0 +1,267 @@
+#!/usr/bin/env python3
+import argparse
+import math
+import os
+import shutil
+import subprocess
+import sys
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Create a single-row screenshot flow image from a video.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""examples:
+  flow screen-recording.mov
+  flow screen-recording.mov --count 12
+  flow screen-recording.mov --height 900 --fps 4""",
+    )
+    parser.add_argument("input", help="Input screen recording, e.g. recording.mov")
+    parser.add_argument(
+        "--height",
+        "-H",
+        type=int,
+        default=1200,
+        help="Frame height in pixels. Default: 1200",
+    )
+    parser.add_argument(
+        "--count",
+        "-n",
+        type=int,
+        help="Total number of frames to show. Overrides --fps.",
+    )
+    parser.add_argument(
+        "--fps",
+        type=float,
+        default=7,
+        help="Frames per second to sample when --count is not set. Default: 7",
+    )
+    parser.add_argument(
+        "--gap",
+        "-g",
+        type=int,
+        default=24,
+        help="Spacing between frames in pixels. Default: 24",
+    )
+    parser.add_argument(
+        "--bg",
+        default="#f7f7f5",
+        help="Background color for spacing as #RRGGBB. Default: #f7f7f5",
+    )
+    parser.add_argument(
+        "--output",
+        "-o",
+        help="Output file. Default: input filename with _flow.png suffix.",
+    )
+    return parser.parse_args()
+
+
+def require_binary(name):
+    if not shutil.which(name):
+        sys.exit(f"error: {name} is required but was not found on PATH")
+
+
+def output_path(input_path, explicit_output):
+    if explicit_output:
+        return explicit_output
+    directory, filename = os.path.split(input_path)
+    stem, _ = os.path.splitext(filename)
+    return os.path.join(directory, f"{stem}_flow.png")
+
+
+def parse_hex_color(value):
+    if len(value) != 7 or not value.startswith("#"):
+        sys.exit("error: --bg must use #RRGGBB format")
+    try:
+        return bytes(int(value[i : i + 2], 16) for i in (1, 3, 5))
+    except ValueError:
+        sys.exit("error: --bg must use #RRGGBB format")
+
+
+def ffprobe_duration(input_path):
+    result = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            input_path,
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if result.returncode != 0:
+        sys.exit(result.stderr.strip() or "error: ffprobe failed")
+    try:
+        duration = float(result.stdout.strip())
+    except ValueError:
+        sys.exit("error: could not read video duration")
+    if duration <= 0:
+        sys.exit("error: video duration must be greater than zero")
+    return duration
+
+
+def sample_timestamps(duration, count, fps):
+    safe_duration = max(0.001, duration - 0.001)
+    if count is not None:
+        if count <= 0:
+            sys.exit("error: --count must be greater than zero")
+        return [
+            min(safe_duration, duration * (i + 0.5) / count)
+            for i in range(count)
+        ]
+
+    if fps <= 0:
+        sys.exit("error: --fps must be greater than zero")
+    count = max(1, math.ceil(duration * fps))
+    return [min(safe_duration, i / fps) for i in range(count)]
+
+
+def read_token(data, index):
+    while index < len(data) and data[index] in b" \t\r\n":
+        index += 1
+    if index < len(data) and data[index] == ord("#"):
+        while index < len(data) and data[index] not in b"\r\n":
+            index += 1
+        return read_token(data, index)
+    start = index
+    while index < len(data) and data[index] not in b" \t\r\n":
+        index += 1
+    return data[start:index], index
+
+
+def parse_ppm(data):
+    magic, index = read_token(data, 0)
+    if magic != b"P6":
+        sys.exit("error: ffmpeg did not return a PPM image")
+    width_token, index = read_token(data, index)
+    height_token, index = read_token(data, index)
+    maxval_token, index = read_token(data, index)
+    if maxval_token != b"255":
+        sys.exit("error: unsupported PPM max value")
+    while index < len(data) and data[index] in b" \t\r\n":
+        index += 1
+    width = int(width_token)
+    height = int(height_token)
+    pixels = data[index:]
+    expected = width * height * 3
+    if len(pixels) != expected:
+        sys.exit("error: incomplete frame data returned by ffmpeg")
+    return width, height, pixels
+
+
+def extract_frame(input_path, timestamp, height):
+    result = subprocess.run(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-ss",
+            f"{timestamp:.6f}",
+            "-i",
+            input_path,
+            "-frames:v",
+            "1",
+            "-vf",
+            f"scale=-2:{height}",
+            "-f",
+            "image2pipe",
+            "-vcodec",
+            "ppm",
+            "-",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if result.returncode != 0:
+        sys.exit(result.stderr.decode("utf-8", "replace").strip() or "error: ffmpeg failed")
+    return parse_ppm(result.stdout)
+
+
+def compose_row(frames, gap, bg):
+    frame_height = frames[0][1]
+    output_width = sum(frame[0] for frame in frames) + gap * (len(frames) - 1)
+    output = bytearray(bg * (output_width * frame_height))
+
+    x = 0
+    for width, height, pixels in frames:
+        if height != frame_height:
+            sys.exit("error: extracted frames have inconsistent heights")
+        row_bytes = width * 3
+        output_row_bytes = output_width * 3
+        for y in range(frame_height):
+            src_start = y * row_bytes
+            dst_start = y * output_row_bytes + x * 3
+            output[dst_start : dst_start + row_bytes] = pixels[src_start : src_start + row_bytes]
+        x += width + gap
+
+    return output_width, frame_height, bytes(output)
+
+
+def write_png(output_path, width, height, rgb_data):
+    result = subprocess.run(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgb24",
+            "-s",
+            f"{width}x{height}",
+            "-i",
+            "-",
+            "-frames:v",
+            "1",
+            output_path,
+        ],
+        input=rgb_data,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if result.returncode != 0:
+        sys.exit(result.stderr.decode("utf-8", "replace").strip() or "error: PNG encode failed")
+
+
+def main():
+    args = parse_args()
+    require_binary("ffmpeg")
+    require_binary("ffprobe")
+
+    if args.height <= 0:
+        sys.exit("error: --height must be greater than zero")
+    if args.gap < 0:
+        sys.exit("error: --gap must be zero or greater")
+
+    input_path = args.input
+    if not os.path.isfile(input_path):
+        sys.exit(f"error: input file not found: {input_path}")
+
+    duration = ffprobe_duration(input_path)
+    timestamps = sample_timestamps(duration, args.count, args.fps)
+
+    frames = []
+    for index, timestamp in enumerate(timestamps, start=1):
+        print(f"extracting {index}/{len(timestamps)} at {timestamp:.2f}s", file=sys.stderr)
+        frames.append(extract_frame(input_path, timestamp, args.height))
+
+    width, height, rgb_data = compose_row(frames, args.gap, parse_hex_color(args.bg))
+    out = output_path(input_path, args.output)
+
+    if width > 32767:
+        print(
+            f"warning: output width is {width}px; some apps cannot display very wide PNGs",
+            file=sys.stderr,
+        )
+
+    write_png(out, width, height, rgb_data)
+    print(out)
+
+
+if __name__ == "__main__":
+    main()
