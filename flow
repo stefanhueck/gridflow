@@ -7,6 +7,12 @@ import subprocess
 import sys
 
 
+DEFAULT_HEIGHT = 1200
+DEFAULT_FPS = 7
+DEFAULT_GAP = 24
+DEFAULT_BG = "#f7f7f5"
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Create a single-row screenshot flow image from a video.",
@@ -21,7 +27,7 @@ def parse_args():
         "--height",
         "-H",
         type=int,
-        default=1200,
+        default=DEFAULT_HEIGHT,
         help="Frame height in pixels. Default: 1200",
     )
     parser.add_argument(
@@ -33,25 +39,25 @@ def parse_args():
     parser.add_argument(
         "--fps",
         type=float,
-        default=7,
+        default=DEFAULT_FPS,
         help="Frames per second to sample when --count is not set. Default: 7",
     )
     parser.add_argument(
         "--gap",
         "-g",
         type=int,
-        default=24,
+        default=DEFAULT_GAP,
         help="Spacing between frames in pixels. Default: 24",
     )
     parser.add_argument(
         "--bg",
-        default="#f7f7f5",
+        default=DEFAULT_BG,
         help="Background color for spacing as #RRGGBB. Default: #f7f7f5",
     )
     parser.add_argument(
         "--output",
         "-o",
-        help="Output file. Default: input filename with _flow.png suffix.",
+        help="Output file. Default: input filename with _flow plus option suffixes.",
     )
     return parser.parse_args()
 
@@ -61,12 +67,33 @@ def require_binary(name):
         sys.exit(f"error: {name} is required but was not found on PATH")
 
 
-def output_path(input_path, explicit_output):
+def format_suffix_value(value):
+    if isinstance(value, float):
+        value = f"{value:g}"
+    return str(value).replace(".", "p").replace("#", "")
+
+
+def output_suffix(args):
+    parts = ["flow"]
+    if args.count is not None:
+        parts.append(f"count{format_suffix_value(args.count)}")
+    elif args.fps != DEFAULT_FPS:
+        parts.append(f"fps{format_suffix_value(args.fps)}")
+    if args.height != DEFAULT_HEIGHT:
+        parts.append(f"height{format_suffix_value(args.height)}")
+    if args.gap != DEFAULT_GAP:
+        parts.append(f"gap{format_suffix_value(args.gap)}")
+    if args.bg.lower() != DEFAULT_BG:
+        parts.append(f"bg{format_suffix_value(args.bg.lower())}")
+    return "-".join(parts)
+
+
+def output_path(input_path, explicit_output, args):
     if explicit_output:
         return explicit_output
     directory, filename = os.path.split(input_path)
     stem, _ = os.path.splitext(filename)
-    return os.path.join(directory, f"{stem}_flow.png")
+    return os.path.join(directory, f"{stem}_{output_suffix(args)}.png")
 
 
 def parse_hex_color(value):
@@ -252,7 +279,7 @@ def main():
         frames.append(extract_frame(input_path, timestamp, args.height))
 
     width, height, rgb_data = compose_row(frames, args.gap, parse_hex_color(args.bg))
-    out = output_path(input_path, args.output)
+    out = output_path(input_path, args.output, args)
 
     if width > 32767:
         print(
