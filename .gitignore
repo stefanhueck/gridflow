@@ -1,0 +1,18 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+.python-version
+.venv/
+venv/
+env/
+
+# Logs and local scratch output
+*.log
+tmp/
+*.tmp
+
+# Generated media output from examples/tests
+*_flow.png
