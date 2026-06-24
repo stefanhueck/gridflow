@@ -143,8 +143,9 @@ def parse_ppm(data):
     maxval_token, index = read_token(data, index)
     if maxval_token != b"255":
         sys.exit("error: unsupported PPM max value")
-    while index < len(data) and data[index] in b" \t\r\n":
-        index += 1
+    if index >= len(data) or data[index] not in b" \t\r\n":
+        sys.exit("error: malformed PPM header")
+    index += 1
     width = int(width_token)
     height = int(height_token)
     pixels = data[index:]
